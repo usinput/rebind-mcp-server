@@ -1,0 +1,63 @@
+{
+  "name": "@rebind.gg/mcp-server",
+  "version": "0.2.0",
+  "description": "MCP server exposing Rebind as computer-use tools: screenshot, verified click, type, key, scroll, and window control over the Remote Control protocol.",
+  "type": "module",
+  "bin": {
+    "rebind-mcp-server": "src/index.ts"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "US Input Company",
+    "email": "inquiries@usinput.com",
+    "url": "https://usinput.com"
+  },
+  "homepage": "https://rebind.gg",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/usinput/rebind-mcp-server.git"
+  },
+  "bugs": {
+    "email": "support@rebind.gg"
+  },
+  "keywords": [
+    "rebind",
+    "mcp",
+    "model-context-protocol",
+    "computer-use",
+    "hid",
+    "automation",
+    "keyboard",
+    "mouse"
+  ],
+  "engines": {
+    "bun": ">=1.1"
+  },
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "selftest": "bun run src/index.ts --selftest",
+    "test": "bun test src/ tests/",
+    "typecheck": "tsc --noEmit",
+    "bench": "bun run bench/runner.ts",
+    "bench:selftest": "bun run bench/runner.ts --selftest",
+    "bench:setup": "bun run bench/runner.ts --setup-only",
+    "bench:demo": "bash bench/demo.sh"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@rebind.gg/client-ts": "0.3.0",
+    "sharp": "^0.34.2",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
