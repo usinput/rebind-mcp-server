@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["es2022"],
+    "types": ["bun-types"],
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noUncheckedIndexedAccess": true,
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*", "tests/**/*", "bench/**/*"]
+}
