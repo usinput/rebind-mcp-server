@@ -1,0 +1,901 @@
+---
+title: "CLI Reference"
+description: "Every rebind command and flag: package development, publishing, script management, troubleshooting, and exit status."
+---
+
+`rebind` is the command-line companion to the Rebind app: scaffold a package,
+validate and lint it offline, run it against your local Rebind with live logs
+and hot reload, then pack, install, and publish it. It also streams logs,
+manages loaded script instances, records macros, sends diagnostic reports,
+and controls the installed service. For a
+walkthrough of one development loop, see [Use the CLI](/getting-started/cli).
+
+On Windows, the standard setup installs the CLI and adds it to your `PATH`; a
+custom setup can leave it out. On macOS, the install script installs it to
+`/usr/local/bin/rebind`, which is already on your `PATH`.
+
+The CLI owns the package on disk. Everything after publish (review status,
+private or public, the listing's channel, withdrawing a version, and sales)
+lives on rebind.gg under **Account > Listings**, and the payout method on your
+account page there. See [Publishing scripts](/marketplace/publishing).
+
+`init`, `check`, `lint`, `pack`, `preview`, `publish --dry-run`, and
+`observe --schema` work fully offline. `service` talks to the operating
+system's service manager and works while Rebind is down. Every other command
+needs Rebind running. `whoami`, `publish`, `report`, and `install` of a
+marketplace listing also need it signed in.
+
+## Commands
+
+`rebind`, `rebind --help`, and `rebind help` print this list.
+
+```
+usage: rebind <command> [args]
+
+develop
+  rebind init [path]     scaffold a package, default: current directory
+  rebind check [path]    validate a package or script            (c)
+  rebind lint [path]     lint the require graph                  (l)
+  rebind run [path]      run in Rebind with live logs            (r)
+  rebind exec <code>     one-off chunk in Rebind                 (x)
+  rebind repl            interactive session
+
+packages
+  rebind pack [path]     build the .rbp archive                  (p)
+  rebind install <spec>  install a .rbp file or @handle/name     (i)
+  rebind preview [path]  preview the marketplace listing locally
+  rebind publish [path]  submit for marketplace review
+
+troubleshoot
+  rebind logs            live log lines from Rebind and every script
+  rebind macro record    record a macro after a window and input trigger
+  rebind observe         record input, windows and screenshots for an agent
+  rebind report          send logs and diagnostics to support
+  rebind service <verb>  status, start, stop, restart
+
+scripts
+  rebind ps             list loaded script instances and metrics
+  rebind script <verb>  start, stop, restart, inspect
+
+account
+  rebind whoami          session, device, transport              (w)
+  rebind ui              open the Rebind app as its own window
+
+rebind <command> --help lists that command's options.
+```
+
+The letters in parentheses are aliases: `rebind c` is `rebind check`. Optional
+`[path]` arguments default to the current directory and accept a package
+directory or a single `.lua`/`.luau` file, unless the section says otherwise.
+
+## init
+
+```
+rebind init [PATH]
+```
+
+Scaffolds a package. The package name is the final path component, lowercased,
+with each run of characters other than letters and digits turned into a hyphen
+(`rebind init tools/hello` creates a package named `hello`, and
+`rebind init "My Tool"` one named `my-tool`).
+
+```
+$ rebind init hello
+created hello
+  rebind.toml  main.luau  README.md  .gitignore
+
+next: cd hello && rebind run
+```
+
+Files that already exist are kept, so `rebind init` in a folder that holds a
+`main.luau` you already wrote adds only the manifest around it. A directory
+that already holds a `rebind.toml` is refused.
+
+The new `main.luau` uses `rb`, so the manifest declares `min_sdk = "3.9.0"`.
+When an existing `main.luau` does not use `rb`, the manifest declares
+`min_sdk = "3.0.0"` instead. The scaffolded `rebind.toml` carries a
+commented-out `[marketplace]` block, and `.gitignore` ignores `*.rbp`. The
+scaffold passes `rebind check` as written.
+
+## check
+
+```
+rebind check [OPTIONS] [PATH]      alias: c
+  --allow-missing-media   allow absent listing media in an installed or extracted package
+```
+
+Offline validation of the [package contract](/reference/packages): manifest
+schema and pricing rules, identity declarations, the full `require` graph, Luau
+compilation of every reachable module, and a permission audit.
+
+```
+$ rebind check
+checking hello v0.0.1
+ok  manifest / modeline / require graph (1 module) / compile / permissions
+```
+
+Checking a script that lives inside a package shows its container:
+
+```
+$ rebind check scripts/wiggle.luau
+checking wiggle (in hello v0.0.1)
+ok  modeline / require graph (1 module) / compile / permissions
+```
+
+A bare script must declare `name`, `version`, and `min_sdk` in its modeline. A
+package must declare `min_sdk` under `[package]`. A `require()` with a
+non-literal argument is a warning, since it cannot be followed; with `drm = true`
+it is an error. A table other than `[package]`, `[runtime]`, and
+`[marketplace]` is a warning, because publishing refuses it. A modeline or
+`[runtime]` key Rebind does not know is a warning too: Rebind ignores the key.
+
+### Permission audit
+
+The audit compares what the code uses with the entry's declared permissions:
+
+- `rb.net` calls need `net`. A `net:<host>` entry covers the outbound calls and
+  `rb.net.ws_connect`, but not the listeners or `rb.net.local_ip`.
+- `rb.system.exec`, `rb.system.exec_detached`, `rb.env.set` and `rb.pipe.open`
+  need `exec`.
+- `rb.ai` calls need `ai` or a matching `ai:<call>` entry.
+  `require("@rebind/pro")` returns `rb`, so the audit treats it as a use of
+  `rb.ai` and it needs `ai` too.
+- `rb.clipboard.get` needs `clipboard:read` and `rb.clipboard.set` needs
+  `clipboard:write`.
+- The pixel reads (`rb.screen.pixel_hex`, `search_color`, `capture` and
+  `find_image`), `rb.screen.elements`, the text reads (`read`, `find_text`
+  and `wait_text`), `rb.ai.find` and `rb.ai.read` need
+  `screen` or `screen:target`. `rb.ai.decide` is not audited for it, since it looks only
+  when asked, and neither are calls made through `require("@rebind/pro")`.
+- `rb.observe` calls need `observe`, even in a script that declares no
+  permissions, and `min_sdk` 3.15.0 or later.
+
+The v1 names (`Net.*`, `System.Exec*`, `Env.Set`, `Pipe.Open`, `Clipboard.*`
+and the `Screen.*` pixel reads and `Screen.Elements`) are audited the same
+way.
+Any use of `rb`, or of `require("@rebind/pro")`, under a `min_sdk` older than
+3.9.0 fails, since older Rebind has no `rb`. Scoped entries such as
+`net:poe.ninja` need `min_sdk` 3.8.0 or later.
+
+A script that declares no permissions holds all of them except `observe`, so
+the comparison has nothing else to contradict. A package with a `[marketplace]`
+block is held to more: it must declare its permissions (`permissions = []` when
+it needs none), and give a reason for `exec`, `net`, `screen` or
+`screen:target`, and `observe` in `permission_reasons`. `check` fails it here rather than at upload:
+
+```
+$ rebind check
+checking mk v0.0.1
+error: permissions are not declared, so the script would hold all of them
+   help: add `permissions = [...]` to [runtime] listing what it uses, or `permissions = []` if it needs nothing
+error: `exec` needs a reason the install screen can show
+   help: add `permission_reasons = ["exec: <why it needs this>"]` under [runtime], or `-- rebind: permission_reason="exec: <why>"` to a single script
+error: `net` needs a reason the install screen can show
+   help: add `permission_reasons = ["net: <why it needs this>"]` under [runtime], or `-- rebind: permission_reason="net: <why>"` to a single script
+error: check failed with 3 errors
+```
+
+The audit reads the source as tokens, so a mention inside a string or comment
+is not a call. It does not follow aliases (`local n = rb.net; n.get()`).
+
+### Listing checks
+
+With a `[marketplace]` block, `check` also validates the listing: categories,
+prices, the shape and caps of everything the block declares, and for
+`drm = true`, no non-literal `require`, no runtime data files, and the sealed
+size cap.
+What must merely be present (a `summary`, a screenshot) is `publish`'s concern.
+The rules and limits live in
+[Package format](/reference/packages#the-marketplace-listing).
+
+```
+$ rebind check
+checking mk v0.0.1
+error: category `nonsense` is invalid; it must be one of: gaming, mouse, remapping, macro, text, apps, audio, streaming, productivity, accessibility, utility, ai, creative
+   --> rebind.toml
+error: check failed with 1 error
+```
+
+The `channel` key takes a channel slug, or `false`, and cannot be combined
+with `private = true`:
+
+```
+$ rebind check
+checking mk v0.0.1
+error: channel `Night Owls` is not a valid channel slug
+   --> rebind.toml
+   help: 1 to 32 lowercase letters, digits, and hyphens (e.g. channel = "my-channel")
+error: [marketplace] sets private = true and a channel
+   --> rebind.toml
+   help: a channel listing is already left out of browse; remove private
+error: check failed with 2 errors
+```
+
+### Installed and extracted packages
+
+Archives keep the manifest but omit its declared listing media. For an
+installed or extracted package directory, allow the missing files explicitly:
+
+```sh
+rebind check ./package --allow-missing-media
+rebind run ./package --allow-missing-media
+rebind pack ./package --allow-missing-media
+```
+
+This permits absent listing media only. Media declarations and files that
+exist are still validated, as are the code, permissions, and package limits.
+`run` keeps the option during hot reload. Without it, missing declared media is
+an error, so author checks catch missing assets. `publish` always requires the
+declared media files and has no such option.
+
+## lint
+
+```
+rebind lint [PATH]      alias: l
+```
+
+Advisory linting over the same `require` graph, with the Rebind standard
+library preloaded so `rb` and the rest of the SDK resolve. Warnings never block
+anything; error-severity findings (definite bugs, such as a misspelled global)
+exit with status 1 and block `publish`.
+
+```
+$ rebind lint lintdemo.luau
+linting lintdemo
+warning: dx is assigned a value, but never used
+  --> lintdemo.luau:2
+lint: 1 warning, 0 errors
+```
+
+## run
+
+```
+rebind run [OPTIONS] [PATH]      alias: r
+  --all-logs              stream every Rebind log line, not just this script's
+  --allow-missing-media   allow absent listing media, including during hot reload
+```
+
+The development loop: checks the target, loads the entry into the running
+Rebind, streams the script's own log lines, and reloads when a source file
+changes. Only this script's lines appear: its own log output plus Rebind's
+lifecycle notices and errors for it. `--all-logs` streams every Rebind log line,
+prefixed with its source.
+
+Edits to `.lua`, `.luau`, and `.toml` files and anything under `assets/`
+trigger a reload. A failing check keeps the previous run alive. If the package
+entry changes, restart `rebind run`. Reload uses the
+[restart lifecycle](#script), so a failure after the old runtime stops does not
+restore it, and `run` exits with status 1. A `.rbp` file cannot be run; pass a
+package directory or a script.
+
+`rebind run scripts/wiggle.luau` runs a single script from a package's
+`scripts/` directory. It inherits the package's `min_sdk`, and its `require`s
+resolve from the package root.
+
+The command owns the instance it started. If something else stops or restarts
+it, the kill switch fires, or Rebind restarts, the watcher prints "Script
+ownership changed; the development watcher has stopped." and exits with status
+0 instead of starting the script again. A Rebind too old to report ownership
+is refused before anything starts.
+
+`Ctrl+C` stops the instance and exits. Force-killing the CLI can leave the
+script loaded; use [ps](#ps) and [script stop](#script) to find and stop it.
+Use [logs](#logs) to watch output without starting a script.
+
+## exec and repl
+
+```
+rebind exec <CODE>      alias: x
+rebind repl
+```
+
+Both run chunks in a persistent scratch runtime inside Rebind: the full SDK
+with real input and output, and state that survives between calls. `exec`
+prints what the chunk printed, then its return values separated by tabs.
+
+```bash
+rebind exec 'rb.log.info("hello")'
+rebind x 'foo = 19'
+rebind x 'return foo + 23'
+```
+
+`rebind exec -` reads the chunk from stdin. A Luau error exits with status 1.
+
+`rebind repl` is the interactive version: same runtime, TAB completion queried
+live from the runtime (your own variables complete, not only SDK names), and
+unfinished chunks continue on the next line. `Ctrl+D` exits.
+
+## pack
+
+```
+rebind pack [OPTIONS] [PATH]      alias: p
+  --out <OUT>             output path (default: <slug>.rbp in the current directory)
+  --allow-missing-media   allow absent listing media when repacking an installed package
+```
+
+Runs `check`, then builds the `.rbp` registry artifact. What goes in and what
+stays out is in [Package format](/reference/packages#the-rbp-artifact).
+
+```
+$ rebind pack
+checking hello v0.0.1
+ok  manifest / modeline / require graph (1 module) / compile / permissions
+packaged hello.rbp (3 files, 765 B)
+```
+
+The path can be any package directory, including one Rebind installed under its
+scripts folder. Repacking leaves out the hidden `.rebind-market` install marker.
+For omitted listing media, see
+[Installed and extracted packages](#installed-and-extracted-packages).
+
+## install
+
+```
+rebind install [OPTIONS] <SPEC>      alias: i
+  -f, --force   replace an existing install of the same package
+      --allow   grant the permissions it prints (nothing installs without this)
+```
+
+Puts a package into Rebind's scripts folder. `<SPEC>` is a `.rbp` file or a
+marketplace listing as `@handle/name`.
+
+A `.rbp` file lands under `packages/<name>/`, with the name taken from the
+archive's `rebind.toml`. A listing installs under `marketplace/` the same way
+the app does, so the same rules apply: paid listings need a signed-in account
+that owns them, [Pro listings](/account/pro) need Pro, and
+[protected scripts](/marketplace/buying#protected-scripts) have their own
+requirements. A private listing is not reachable this way; install it from the
+link its author shares. Neither is a [channel](/marketplace/channels) listing;
+members install it from the app.
+
+`install` first prints what the package asks for, under "It asks for:", and
+installs only with `--allow`. For a listing, `--allow` approves exactly the
+printed list. If the downloaded version asks for more than its listing showed,
+nothing installs and the CLI tells you to install it from the app instead.
+`--force` replaces an existing install of the same package or listing.
+
+## preview
+
+```
+rebind preview [OPTIONS] [PATH]
+  --json   print a JSON artifact instead of opening a browser
+```
+
+Reads the package manifest and opens a self-contained local HTML approximation
+of its marketplace listing, built from local files and media without running
+the package. The overview comes from `MARKETPLACE.md`, or `README.md` when
+there is none, as [publish](#publish) sends it. No sign-in and no running
+Rebind are needed. The page lists what publish would flag, such as a missing
+summary or an image in the overview. It is not the store UI; run
+`rebind check` for complete validation.
+
+`--json` prints the listing data instead, with local media embedded.
+
+```
+$ rebind preview --json
+{"kind":"listing_preview","title":"mk","listing":{"name":"mk","slug":"mk","summary":"One line.","category":"creative","price":"Free","readme":"# mk\n\n<!-- Ships inside the package and renders as the overview on the\nmarketplace listing. Markdown. -->\n\nWhat this script does.\n","private":false,"channel":"night-owls","drm":false,"media":[],"warnings":["no icon or media. Publish requires a thumbnail."]}}
+```
+
+## publish
+
+```
+rebind publish [OPTIONS] [PATH]
+  --dry-run   prepare and validate the submission without uploading or publishing
+```
+
+Check, lint, pack, then upload for review, or publish into your own channel.
+It requires:
+
+- a package (`rebind.toml`); a bare script has no listing to publish;
+- a signed-in account with a claimed `@handle`
+  ([publishing requirements](/marketplace/publishing#before-you-start));
+- a `[marketplace]` section with `summary` and `category`;
+- at least one `.png` in `media`; the first PNG becomes the cover.
+
+The rest of the listing rules are in
+[The marketplace listing](/reference/packages#the-marketplace-listing).
+
+With `drm = true`, publish bundles the `require` graph into one file (it
+prints `bundled N module(s) into one sealed script`) and uploads no `.rbp`;
+see [DRM packages](/reference/packages#drm-packages). The package's
+`MARKETPLACE.md`, or its `README.md` when there is none, is sent as the
+listing's overview, and `publish` names the file it used. `MARKETPLACE.md`
+needs Rebind 3.21.1 or later; see [Overview](/reference/packages#overview).
+When that file is missing or empty, the product page falls back to `summary`,
+and `publish` says so.
+
+A successful publish ends with a line naming the listing and version as
+submitted for review, and the channel when `rebind.toml` names one. A version
+published into your own active channel can go live at once, and the line then
+says `published` instead of `submitted for review`;
+[Place a listing in a channel](/marketplace/channels#place-a-listing-in-a-channel)
+lists the cases that still wait for review. A `channel` key places the listing
+when the version is submitted, not when it is approved. The server refuses a
+slug that is not one of your active channels.
+[Publishing scripts](/marketplace/publishing) covers what happens next.
+
+`--dry-run` does everything up to the upload locally, then prints the proposed
+listing, terms, and artifact size as JSON. It does not sign in, upload, or
+submit. The account handle, server version conflicts, the review decision,
+and whether a named channel is yours remain unchecked, and the JSON lists them
+under `unchecked`.
+
+## ps
+
+```
+rebind ps [--watch] [--json]
+```
+
+Lists loaded script instances: ID, state, uptime, Luau heap, average tick
+duration, and file, after a line with the instance count and the age of the
+status sample. A loaded instance can be running, inactive, in an error state,
+or restarting. Rebind's own process memory is printed separately when known.
+
+`--watch` redraws as status arrives and needs a terminal. `--json` prints one
+full status object, including its `scripts` array. Together they print
+newline-delimited JSON: one status object per line, starting with the current
+snapshot. Updates may be coalesced, so this is a status feed, not a log of
+every lifecycle event. When no status arrives for 3 seconds, a stale-status
+warning goes to stderr. `Ctrl+C` or a closed output pipe exits with status 0.
+
+The heap is that runtime's Luau allocation, not process memory. Tick duration is
+an average in microseconds, not a CPU percentage. A missing metric means
+unknown, not zero.
+
+## script
+
+```
+rebind script start <PATH>
+rebind script stop <SELECTOR>
+rebind script restart <SELECTOR>
+rebind script inspect [--json] <SELECTOR>
+rebind script data [--json] <PATH>
+```
+
+Controls one loaded instance through Rebind's lifecycle manager.
+
+```bash
+rebind script start packages/hello/main.luau
+rebind script inspect packages/hello/main.luau --json
+rebind script restart packages/hello/main.luau
+rebind script stop packages/hello/main.luau
+```
+
+`start <PATH>` needs a file in Rebind's installed scripts folder; use
+[run](#run) for a development file outside it.
+
+`stop`, `restart`, and `inspect` take a selector: the exact runtime ID, an exact
+path reported as the instance's file or source path, or an exact display name.
+An ID wins. Prefixes do not match. If more than one instance matches, the
+command fails and lists the IDs to choose from. `logs --script` uses the same
+rules.
+
+- `stop` stops the instance without changing its autostart setting.
+- `restart` starts a new runtime for the instance. A script loaded from disk is
+  read again and passes the current authorization checks, including those for
+  protected scripts. A script started from source replays the source it was
+  started with, when Rebind kept it. Restart is not transactional: once the old
+  runtime has stopped, a failure to load the replacement leaves an error state.
+- `inspect` prints the instance row, then its launch origin, incarnation (one
+  runtime lifetime; a restart creates a new one), timer and coroutine counts,
+  retry attempts, and any error or reason restart is unavailable. The row goes
+  to stdout and the details to stderr. `--json` prints the instance object to
+  stdout; use it to capture everything.
+- `data` prints the [data folder](/reference/sdk/file) of a
+  script, package, or marketplace listing, loaded or not. `<PATH>` is a file or
+  folder here, or a path in the scripts folder. The folder appears when the
+  script first uses an `@data` path. `--json` prints `{"dir", "exists"}`.
+
+## logs
+
+```
+rebind logs [OPTIONS]
+  --level <LEVEL>     show this level and above: debug, info, warn, error
+  --script <SCRIPT>   select an exact runtime ID, path, or unique name
+```
+
+Streams new log lines from Rebind and every running script. Each line shows
+the local time it arrived, the level, the source, and the message.
+
+```bash
+rebind logs
+rebind logs --level warn
+rebind logs --script packages/hello/main.luau --level warn
+```
+
+With no `--level`, every level appears; `debug` also includes `trace` lines.
+`--script` resolves an instance with the [selector rules](#script) and keeps
+only lines attributed to it. It filters by attribution, not by searching
+the text, and an instance without attributed logs is refused.
+
+There is no history: only new lines appear. If Rebind cannot be reached at
+startup, the command prints where the earlier log files are. Once connected,
+the stream pauses across a Rebind restart and resumes by itself; lines
+emitted in between are lost. `Ctrl+C` stops the stream.
+
+## macro record
+
+```
+rebind macro record [OPTIONS] --window <WINDOW>
+  --window <WINDOW>              case-insensitive foreground window title substring
+  --start-key <START_KEY>        Mouse1 through Mouse5 [default: Mouse1]
+  --stop-key <STOP_KEY>          F1 through F24 [default: F1]
+  --name <NAME>                  [default: recording]
+  --start-on-focus               begin as soon as the window and cursor are prepared
+  --bounds <X,Y,WIDTH,HEIGHT>    window position and size; defaults to the saved layout for this title
+```
+
+Records a macro into a prepared window. The command starts a temporary helper
+script, which needs Rebind running and seeing input.
+
+```sh
+rebind macro record --window Paint --start-key Mouse1 --stop-key F1 --name drawing
+```
+
+When the matching window is in front, the helper moves it to its saved
+position and size, moves the cursor to desktop coordinates `(0, 0)`, and checks
+both before it accepts the start button. Release any held mouse buttons during
+setup. The first run saves the window's current bounds for that title; later
+runs reuse them. `--bounds 60,80,1000,700` sets them explicitly. If the window
+moves or resizes while waiting, setup runs again.
+
+By default the first new press of the start button starts the take and is
+included in it. With `--start-on-focus`, recording starts as soon as setup
+succeeds, including the movement from `(0, 0)` to your first point. The stop
+key finishes the take; its press and release are left out. Pressing it before
+recording starts cancels.
+
+Choose a stop key other than the app's macro recorder hotkey; the command
+refuses that key. If the recorder is busy, the helper fails instead of taking
+it over.
+
+The command first prints `{"state":"created","helper":...}`. The helper then
+runs as with [run](#run), so its check and log lines follow, and its progress
+arrives as log lines whose message is a JSON object with `state`:
+`waiting_window`, `waiting_release`, `positioning`, `waiting_input`,
+`recording`, `saving`, `captured`, `cancelled`, or `failed`. A saved take ends
+with `{"state":"completed","path":...}`, the saved macro's path. A failed or
+cancelled take ends with `Recording ended without a saved take.` on stderr and
+status 1. If saving fails, it prints where the take was kept. `Ctrl+C` stops
+the helper and discards the take. Recording in the app is covered in
+[Macros](/getting-started/macros).
+
+## observe
+
+```
+rebind observe [OPTIONS]
+  --seconds <SECONDS>      seconds to observe, 1 to 14400 [default: 120]
+  --stop-key <STOP_KEY>    a keyboard key that ends the session early, such as F8; the app still receives it
+  --goal <GOAL>            what the recording is for, saved with the session
+  --schema                 print the session folder format as JSON Schema and record nothing
+```
+
+Records what you do for a while so an agent can study it: every key and
+button press and release with its hold time, mouse movement, scroll, the
+active window, the display under the cursor, and screenshots. Rebind's AI
+assistant can run it to study a task before writing a script for it. One
+session runs at a time.
+
+Rebind shows a strip on the active display while any session records,
+whoever started it: the time, a reminder that keys are logged, and how to stop
+(the stop key when the session has one, otherwise what ends it). From Rebind
+3.22.5 it is a red line flush in the display's bottom-left corner, over the
+Dock or taskbar when one reaches it, that reads like a vim mode message, such as `-- OBSERVING --  1:02  8.9 MB  keys logged  F8 to stop`, and
+also shows how much the session has written so far; Rebind 3.21.0 to 3.22.4
+show it at the top of the display. From 3.22.5 the Rebind icon in the menu bar
+(macOS) or tray (Windows) also changes while any session records: a dot beside
+the mark on macOS, a red mark on Windows.
+The strip is left out of the session's screenshots. A game in exclusive
+full-screen mode on Windows hides it.
+
+In hardware mode, game controller buttons are recorded as `down` and `up` with
+names such as `PadA`, and stick and trigger movement as `axis` lines.
+
+The command prints the session folder as a JSON line when it starts and again
+when the session ends. Both lines have `state` (`recording`, then
+`completed`), `id`, `dir`, `file`, `seconds`, `elapsed_ms`, `events`, `frames`,
+`crops`, `marks`, `drops`,
+`bytes`, `owner` (`cli`), `goal`, `frames_off` and `reason`. The `completed`
+line holds the final counts. `--goal` is trimmed, and one over 500 characters
+is refused.
+
+The session ends at `--seconds`, at the stop key, on `Ctrl+C`, when Rebind
+quits, or when the command stops running (Rebind ends a session its command no
+longer renews within 5 seconds). `reason` is `time_limit`, `stop_key`,
+`stopped`, `relay_stopped`, `client_gone` or `size_limit` (512 MB of log and
+images). A session a script started with
+[`rb.observe`](/reference/sdk/observe) also ends with
+`script_stopped` when the script stops, reloads or errors. The stop key is a
+key name in any case; an unknown name, a mouse button or the macro recorder
+hotkey is refused. It is not logged and still reaches the app in front.
+
+Everything is recorded by name, passwords included, and screenshots show
+whatever is on screen. Do not type secrets while a session runs.
+
+### Session folder (format 2)
+
+Every session, whoever started it (this command, the app, or a script), is
+written in the same format, version 2 from Rebind 3.22.5. Sessions recorded
+before it are format 1, which is format 2 without patch files, and read the
+same way. `rebind observe --schema` prints it as
+a JSON Schema (draft 2020-12) covering `metadata.json` and every line kind.
+
+Sessions live in the `observations` folder of the Rebind data folder
+(`%APPDATA%\Rebind\observations` on Windows,
+`~/Library/Application Support/Rebind/observations` on macOS) and stay until
+you delete them.
+
+```
+observations/20261030-204605-7232/
+  metadata.json
+  events.jsonl
+  images/
+    000000000-frame.png
+    000000000-window.png
+    000000300-frame.png
+    000000300-window.png
+    000000300-crop-4.png
+    000000800-patch-000000300.png
+```
+
+- The folder name is the session id: when it started, plus four hex digits. It
+  never changes; a name you give the session is stored in `metadata.json`.
+- `images/` holds PNG files named `<t>-frame.png` (the display),
+  `<t>-window.png` (the active window, from the same capture job, unless
+  the display screenshot already holds it at the same scale) and
+  `<t>-crop-<seq>.png` (the mouse button press or release whose `down` or
+  `up` line has that `seq`). `<t>` is
+  when the capture started, in milliseconds since the session started, padded
+  to 9 digits, so `ls images` lists them in time order. A second capture in the
+  same millisecond adds `-2`, `-3` and so on before `.png`.
+- Frames, windows and crops are 8-bit RGB. A display screenshot taken within
+  10 seconds of the last full one is stored as a patch,
+  `<t>-patch-<base>.png`: an 8-bit RGBA image the size of the screenshot that
+  holds only the pixels that changed since the screenshot at `<base>` (a
+  frame or another patch), every other pixel transparent. Nothing is lost:
+  [`rb.observe.frame`](/reference/sdk/observe), the MCP `observe_frame` tool
+  and the app return a patch as the full screenshot it stands for. Opened on
+  its own, a patch shows only what changed. A full screenshot comes at least
+  every 10 seconds, and after a change of display size.
+- Image fields in the log are paths relative to the session folder.
+
+You can read a session while it records:
+
+- `metadata.json` exists from the moment the session starts and is replaced
+  whole, never written in place.
+- `events.jsonl` is only appended to, one JSON object per line, each ending
+  with a newline. A reader skips an unfinished last line and reads it later.
+- An image is complete on disk before any line names it.
+- A session that ended has an `end` line last. One without it is still
+  recording, or was cut off when Rebind or the computer stopped.
+- When a write to `events.jsonl` fails, the session ends with a `reason` that
+  starts with `write failed`, and its last line may be cut short.
+
+### metadata.json
+
+| field | meaning |
+|---|---|
+| `format` | `2` (`1` for sessions recorded before Rebind 3.22.5) |
+| `id` | the folder name |
+| `name` | null until the session is named in the app or by `rb.observe.rename` |
+| `goal` | what the recording is for, or null |
+| `owner` | who started it: `cli`, `desktop` for the app, another client's label, or a script's name |
+| `owner_kind` | `client` (this command or the app) or `script` (`rb.observe`) |
+| `platform` | `macos` or `windows` |
+| `input` | `hardware` or `software` when the session started |
+| `started_at` | epoch milliseconds |
+| `seconds`, `frame_ms`, `frame_edge` | the session's length limit, the idle screenshot interval (0 off) and the long edge of display screenshots |
+| `frames_off` | why there are no screenshots, or null |
+
+When the session ends, it also gets `ended_at` (epoch ms), `reason`, `events`,
+`frames`, `crops`, `marks`, `drops`, `dropped_marks` and `bytes` (log and
+images). A session cut off by a crash keeps the start fields only; its counts
+are in the log.
+
+### events.jsonl
+
+Every line starts with `seq`, `t` and `kind`, in that order. `seq` counts up
+by one from 0, and `t` is milliseconds since the session started and never
+goes back. The first line is `start`.
+
+| kind | fields |
+|---|---|
+| `start` | `format` (2, or 1 before Rebind 3.22.5), `id`, `epoch_ms`, `seconds`, `stop_key`, `goal` (when given), `owner`, `owner_kind`, `platform`, `input`, `displays`, `frame_edge`, `frame_ms`, `relay` (Rebind's version), `frames_off` |
+| `down`, `up` | `key`, `held` (ms, on `up`), `cursor`, `wcursor`, `dev`, `pre` |
+| `move` | `dx`, `dy` summed over 10 ms, `n` (reports summed), `cursor`, `wcursor`, `dev` |
+| `scroll` | `delta`, `cursor`, `wcursor`, `dev` |
+| `hscroll` | horizontal `delta` (positive scrolls right), `cursor`, `wcursor`, `dev` (hardware mode) |
+| `axis` | `axis` (`LeftX`, `LeftY`, `RightX`, `RightY`, `LT` or `RT`), `value` (2 decimals), `cursor`, `wcursor`, `dev`, written when the axis moves 0.05 or more or returns to 0 (hardware mode) |
+| `window` | `title`, `process`, `x`, `y`, `width`, `height`, when the active window changes |
+| `display` | `index` (1-based, as `rb.screen.list` numbers displays), `x`, `y`, `width`, `height`, `scale`, `primary`, when the cursor moves to another display |
+| `input` | `mode` (`hardware` or `software`), when the input mode changes |
+| `frame` | `file`, `dup`, `cause`, `input`, `shot_t`, `display` (the display it shows, with its `scale`), `width` and `height` (long edge at most `frame_edge`), `cursor` (when the capture started), `ms` (how long the capture took), `win` (the active window's image; absent when the display screenshot already holds the window at the same scale), `win_dup`, `win_rect` (the window's screen rectangle, also present when the display screenshot holds the window and there is no `win`), `win_width` and `win_height` (the window image's pixel size, only with `win`), `win_error` (why the window image failed; the display screenshot is kept) |
+| `crop` | `file`, `dup`, `region` (`x`, `y`, `w`, `h`), `scale`, `click` (the `seq` of a mouse button's `down` line for a press, or of its `up` line for a release), `px`, `shot_t`, right after the `frame` it was cut from |
+| `px_after` | `click` (the `seq` of a mouse button's `down` line), `px`, `shot_t`: the color under a press once its burst has settled |
+| `mark` | `mark` (`mark`, `success`, `failure`, `ai` or `own`), `label` (up to 200 characters), `data` (up to 8 KB of JSON): a note from the session's owner, written by `rb.observe.mark`. `rebind observe` adds none |
+| `missing` | `file`, `reason`, `shot_t`, plus `cause` and `input` for a screenshot or `click` for a crop that failed or was not taken. A capture still running when the session ended has only `file`, `reason` and `shot_t`, and its file may still appear |
+| `reset` | the input source changed or a device was unplugged; releases of earlier presses have `held` null |
+| `devices` | each device that sent input, with the fields in [Devices](/reference/sdk/events#devices) |
+| `end` | `reason`, `events`, `frames`, `crops`, `marks`, `drops`, `dropped_marks` |
+
+`cursor` is in screen coordinates and `wcursor` is relative to the active
+window. `drops` counts inputs the session could not keep up with, and
+`dropped_marks` marks that could not be queued for the running session.
+
+Screenshots follow what you do, not a clock. A `frame` line's `cause` says why
+it was taken:
+
+| cause | when |
+|---|---|
+| `start` | when the session starts |
+| `click` | at once, on a mouse button press |
+| `release` | at once, on a mouse button release |
+| `key` | at once, on Enter, Escape, Tab, or a key pressed while Ctrl, Alt or Win/Cmd is held (Shift does not count) |
+| `input` | at once, on the first input of a burst |
+| `settle` | 400 ms after a burst ends |
+| `window` | 250 ms after the active window's app, position or size changes, at most once a second. A change of title alone (many apps show the document's text in it) is logged as a `window` line but takes no screenshot; the input that changed it has its own |
+| `timer` | `frame_ms` after the last screenshot when nothing else took one (1000 ms for this command) |
+
+A burst is a run of key and button presses, scrolls, stick or trigger
+movement, and pointer travel. Releases extend a burst but never start one. A
+burst ends 400 ms after the last of them and takes a `settle` frame; a release
+with no burst open gets one too. `settle`, `window` and `timer` screenshots
+come at least 250 ms after the one before. The first active window takes no
+`window` frame; the `start` frame shows it.
+
+A `frame` line is written when its capture finishes. Its `t` is the larger of
+its `shot_t` and the previous line's `t`, and `shot_t` is when the capture
+started (the `<t>` in its file name). Its `crop` and `px_after` lines take `t`
+the same way. Inputs made during the capture come before it in the file. Join on
+fields, not on line order:
+
+- `pre` on a `down` or `up` line names the latest screenshot written before
+  that input. It is absent before the first one and when there are no
+  screenshots.
+- `input` on a `frame` line is the `seq` of the mouse button press or
+  release, action key or burst's first input it was taken for. It is absent
+  for `start`, `settle`, `window` and `timer` frames, and when mouse movement
+  started the burst.
+- The first `settle` frame whose `shot_t` is after an input's `t` shows what
+  that input led to.
+
+Mouse button presses and releases made while a screenshot waits to be taken
+share it, up to 8, so a quick click's press and release can share one `click`
+frame. Every mouse button release has a screenshot from after it; keyboard
+keys and controller buttons take no frame on release. Each press and release a
+frame answers gets its own `crop` line: `region` is the 160 by 160 square
+around the pointer in screen coordinates, cut from the display under the
+pointer, which can be another display than the frame's, and `px` is the hex
+color (`rrggbb`) under the pointer. A drag has a crop where it started and one
+where it ended. When the burst settles, a `px_after` line gives the color
+under each of its presses (up to 8) in the `settle` frame. Releases have no
+`px_after`, and presses other than clicks have no color.
+
+Two fields are named `scale` and measure different things. On a `start`
+line's `displays` and on a `display` line, `scale` is the operating system's
+scale factor for that display (1.5 at 150%).
+On a `frame` line's `display` and on a `crop` line, `scale` is image pixels per
+screen unit. Rebind uses physical pixels as screen units on Windows, so that
+one is 1 there whatever the scale setting; on a Mac with a Retina display both
+are 2.
+
+An image whose pixels equal one of the last four of its kind (display,
+window or click crop) writes no file. Its line has `dup` set to true
+(`win_dup` for the window), and `file` or `win` names the earlier file that
+holds those pixels. `frames` and `crops` count the files written.
+
+`dev` names the device only in hardware mode. In software mode the operating
+system does not say which device sent an input, so `dev` is absent and
+`devices` is empty. On macOS, screenshots need Screen capture on in Settings
+and the Screen Recording permission. Without them the session still records
+input and windows, and `frames_off` says why there are no screenshots.
+
+### Reading a session with jq
+
+Run these in a session folder. The first four read a finished session. While
+one records, read each line with `jq -cR 'fromjson? | ...'`, as the last two
+do, so an unfinished last line is skipped instead of stopping jq.
+
+```sh
+# each mouse button press and release with its crop and the color under it
+jq -c 'select(.kind == "crop") | {click, file, px}' events.jsonl
+
+# every mouse press, with its crop when one was taken
+jq -s -c '(map(select(.kind == "crop")) | INDEX(.click)) as $crop
+  | .[] | select(.kind == "down" and (.key | startswith("Mouse")))
+  | {seq, t, key, crop: $crop[(.seq | tostring)].file}' events.jsonl
+
+# the marks
+jq -c 'select(.kind == "mark") | {t, mark, label}' events.jsonl
+
+# presses and average hold time per key
+jq -s -c 'map(select(.kind == "up" and .held != null)) | group_by(.key)
+  | map({key: .[0].key, presses: length, avg_held_ms: (map(.held) | add / length)})' events.jsonl
+
+# each new screenshot: when it was taken, why, which file (a -patch- file is
+# seen whole through rb.observe.frame or observe_frame)
+jq -rR 'fromjson? | select(.kind == "frame" and (.dup | not)) | [.shot_t, .cause, .file] | @tsv' events.jsonl
+
+# follow a session while it records
+tail -n +1 -f events.jsonl | jq -cR 'fromjson? | select(.kind == "frame" or .kind == "mark")'
+```
+
+## report
+
+```
+rebind report [OPTIONS]
+  -m <TEXT>            what went wrong (asked for when omitted on a terminal)
+  --range <RANGE>      how far back the logs go: 24h or 7d [default: 24h]
+  --include-scripts    also send your script source
+  --yes                send without asking (required when there is no terminal)
+```
+
+Sends a diagnostic report through the running, signed-in Rebind app. The
+procedure, the confirmation, and exactly what the bundle contains are in
+[Send logs for review](/support#send-logs-for-review).
+
+## service
+
+```
+rebind service status | start | stop | restart
+```
+
+Checks or controls the installed Rebind service through the operating system's
+service manager. It does not install a missing service.
+
+| Platform | Verbs | Service manager |
+| --- | --- | --- |
+| macOS | `status`, `start`, `stop`, `restart` | Your user's launchd agent. Run it without `sudo`. |
+| Windows | `status`, `start` | The installed scheduled task. `stop` and `restart` are not available yet. |
+
+`status` reports whether Rebind's ports answer, and the service manager's view
+of the service. It exits with status 1 when the ports do not answer.
+
+`start`, `stop`, and `restart` act only on the installed service. They refuse
+when an environment variable points the CLI at another copy of Rebind, and
+name the variable; unset it first. They also refuse when Rebind's
+ports are taken by a copy the service manager does not hold, so stop that copy
+where it runs. Nothing is changed when a command refuses.
+
+`stop` does not turn off starting at login or boot. On macOS, Rebind starts
+again at your next login. `rebind service start`
+brings it back sooner. An install set to
+[start on demand](/getting-started/quickstart#start-rebind-only-when-you-open-it)
+stays stopped until `rebind service start`, or until you open the app.
+
+## whoami
+
+```
+rebind whoami      alias: w
+```
+
+Prints the signed-in account and its session:
+
+- your `@handle` and email;
+- `tier`: `free`, `pro`, or `developer`;
+- `mcid`: the Rebind Link connected now, as the short ID the app shows, marked
+  `(attached)` or `(not on this account)`. With none connected, it lists the
+  Links registered to the account as `(not attached)`, or `(none paired)`;
+- `transport`: `hardware` when your Rebind Link drives output, `software`
+  otherwise.
+
+## ui
+
+```
+rebind ui [--url <URL>]
+```
+
+On Windows with the default URL, opens the installed Rebind desktop app when
+that optional component is present. Otherwise it opens the control panel as an
+app window in an installed Chrome, Edge, Brave, Vivaldi, or Chromium, falling
+back to an ordinary browser tab.
+
+`--url` defaults to `http://127.0.0.1:19480`.
+
+## Exit status
+
+| Status | Meaning |
+| --- | --- |
+| `0` | Success. For `logs` and `ps --watch`, this includes `Ctrl+C` and a closed output pipe, and for `run`, stopping because its script's ownership changed. |
+| `1` | Failure or refusal: a failed check or lint error, an unreachable Rebind, a refused upload, a cancelled report, or `service status` finding Rebind down. |
+| `2` | Usage error: unknown flags, `report` without `-m` or `--yes` and no terminal, `ps --watch` without a terminal or `--json`, or `run` given a `.rbp` file. |
